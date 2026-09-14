@@ -3,6 +3,7 @@ process.env.PUPPETEER_CACHE_DIR = path.join(__dirname, '.puppeteer-cache');
 
 const express = require('express');
 const puppeteer = require('puppeteer');
+            whatsappStatus = 'initializing';
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
@@ -17,12 +18,17 @@ app.get('/health', (request, response) => {
     response.json({ status: 'ok' });
 });
 
+app.get('/status', (request, response) => {
+    response.json({ status: whatsappStatus, ready: Boolean(readyAt) });
+});
+
 app.listen(port, () => {
     console.log(`Health server listening on port ${port}`);
 });
 
 let client;
 const chatMenus = new Map();
+let whatsappStatus = 'starting';
 let readyAt = 0;
 let hasLoggedAuthenticated = false;
 let waitingLogTimer = null;
@@ -56,9 +62,15 @@ function attachClientEvents(whatsappClient) {
     });
 
     whatsappClient.on('qr', (qr) => {
+        whatsappStatus = 'waiting_for_qr_scan';
         console.log('Scan this QR code with WhatsApp:');
         qrcode.generate(qr, { small: true });
         console.log(`QR_CODE_PAYLOAD:${qr}`);
+    });
+
+    whatsappClient.on('error', (error) => {
+        whatsappStatus = 'error';
+        console.error('WhatsApp browser error:', error.message || error);
     });
 
     whatsappClient.on('change_state', (state) => {
@@ -79,6 +91,7 @@ function attachClientEvents(whatsappClient) {
         }
 
         hasLoggedAuthenticated = true;
+        whatsappStatus = 'authenticated';
         console.log('WhatsApp login session received. Finishing startup...');
         console.log('WhatsApp authenticated. Waiting for chats to finish loading...');
         startWaitingLog();
@@ -87,14 +100,17 @@ function attachClientEvents(whatsappClient) {
     whatsappClient.on('ready', () => {
         stopWaitingLog();
         readyAt = Date.now();
+        whatsappStatus = 'ready';
         console.log('WhatsApp connected successfully!');
     });
 
     whatsappClient.on('auth_failure', (message) => {
+        whatsappStatus = 'auth_failure';
         console.error('WhatsApp authentication failed:', message);
     });
 
     whatsappClient.on('disconnected', (reason) => {
+        whatsappStatus = 'disconnected';
         console.error('WhatsApp disconnected:', reason);
     });
 
