@@ -1,6 +1,20 @@
 const path = require('path');
+process.env.PUPPETEER_CACHE_DIR = path.join(__dirname, '.puppeteer-cache');
+
+const express = require('express');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+
+const app = express();
+const port = Number(process.env.PORT || 3000);
+
+app.get('/health', (request, response) => {
+    response.json({ status: 'ok' });
+});
+
+app.listen(port, () => {
+    console.log(`Health server listening on port ${port}`);
+});
 
 let client;
 const chatMenus = new Map();
