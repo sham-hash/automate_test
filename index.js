@@ -22,6 +22,7 @@ let waitingLogTimer = null;
 let startupStartedAt = Date.now();
 let loadingPercent = 0;
 let loadingMessage = 'Starting Chrome...';
+let whatsappStarting = false;
 
 function escapeHtml(value) {
     return String(value)
@@ -62,7 +63,7 @@ function renderQrPage() {
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    ${connected ? '' : '<meta http-equiv="refresh" content="3">'}
+    ${connected || scanned ? '<meta http-equiv="refresh" content="8">' : '<meta http-equiv="refresh" content="5">'}
     <title>WhatsApp login</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 420px; margin: 40px auto; padding: 0 16px; text-align: center; color: #111; }
@@ -129,16 +130,28 @@ function createClient() {
             headless: true,
             executablePath,
             dumpio: process.env.DEBUG_CHROME === '1',
-            protocolTimeout: 420000,
+            protocolTimeout: 180000,
+            handleSIGINT: false,
+            handleSIGTERM: false,
+            handleSIGHUP: false,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 '--disable-software-rasterizer',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-hang-monitor',
+                '--disable-breakpad',
+                '--disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process',
+                '--renderer-process-limit=1',
+                '--js-flags=--max-old-space-size=128',
                 '--no-first-run',
+                '--no-default-browser-check',
                 '--no-zygote',
-                '--single-process',
                 '--mute-audio'
             ]
         }
@@ -241,8 +254,18 @@ function attachClientEvents(whatsappClient) {
     });
 
     whatsappClient.on('disconnected', (reason) => {
+        readyAt = 0;
         whatsappStatus = 'disconnected';
+        loadingMessage = 'WhatsApp disconnected after login. Reconnecting with the saved session...';
         console.error('WhatsApp disconnected:', reason);
+
+        if (!whatsappStarting) {
+            setTimeout(() => {
+                startWhatsApp(1).catch((error) => {
+                    console.error('WhatsApp reconnect failed:', error.message || error);
+                });
+            }, 5000);
+        }
     });
 
     whatsappClient.on('message', async (message) => {
@@ -481,6 +504,13 @@ function waitForReady(whatsappClient, timeoutMs = 120000) {
 }
 
 async function startWhatsApp(maxAttempts = 3) {
+    if (whatsappStarting) {
+        return;
+    }
+
+    whatsappStarting = true;
+
+    try {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         readyAt = 0;
         latestQr = '';
@@ -557,6 +587,9 @@ async function startWhatsApp(maxAttempts = 3) {
 
             await new Promise((resolve) => setTimeout(resolve, 3000));
         }
+    }
+    } finally {
+        whatsappStarting = false;
     }
 }
 
