@@ -40,17 +40,22 @@ function elapsedLabel() {
 
 function renderQrPage() {
     const connected = Boolean(readyAt);
-    const hasQr = Boolean(latestQrImage) && !connected;
+    const scanned = hasLoggedAuthenticated && !connected;
+    const hasQr = Boolean(latestQrImage) && !connected && !scanned;
     const heading = connected
         ? 'WhatsApp is connected'
-        : hasQr
-            ? 'Scan this QR code first'
-            : 'Getting WhatsApp QR code...';
+        : scanned
+            ? 'QR scanned. Connecting the bot...'
+            : hasQr
+                ? 'Scan this QR code first'
+                : 'Getting WhatsApp QR code...';
     const details = connected
-        ? 'You can close this page. Keep the Render service running.'
-        : hasQr
-            ? 'Scan this code in WhatsApp first. After that, the bot will finish connecting.'
-            : 'Wait here for the QR code. Loading 0% is normal until the code appears.';
+        ? 'The bot is live. Keep the Render service running.'
+        : scanned
+            ? 'Login succeeded. Waiting a few seconds for the bot to come online.'
+            : hasQr
+                ? 'Scan this code in WhatsApp first. After that, the bot will finish connecting.'
+                : 'Wait here for the QR code. Do not refresh until it appears.';
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -69,8 +74,7 @@ function renderQrPage() {
     <h1>${escapeHtml(heading)}</h1>
     <p class="status">Status: ${escapeHtml(whatsappStatus)}</p>
     ${hasQr ? `<img alt="WhatsApp QR code" src="${latestQrImage}">` : `<p>${escapeHtml(loadingMessage)}</p>`}
-    ${connected && loadingPercent ? `<p>Finishing login: ${escapeHtml(String(loadingPercent))}%</p>` : ''}
-    ${whatsappStatus === 'authenticated' ? `<p>QR scanned. Finishing login: ${escapeHtml(String(loadingPercent))}%</p>` : ''}
+    ${scanned ? `<p>QR scanned. Finishing login: ${escapeHtml(String(loadingPercent))}%</p>` : ''}
     <p class="status">Elapsed: ${escapeHtml(elapsedLabel())}</p>
     <p>${escapeHtml(details)}</p>
 </body>
@@ -116,6 +120,8 @@ function createClient() {
         webVersionCache: {
             type: 'local'
         },
+        takeoverOnConflict: true,
+        takeoverTimeoutMs: 10000,
         authTimeoutMs: 360000,
         userAgent:
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.31 Safari/537.36',
@@ -139,16 +145,46 @@ function createClient() {
     });
 }
 
+function markAuthenticated() {
+    if (hasLoggedAuthenticated) {
+        return;
+    }
+
+    hasLoggedAuthenticated = true;
+    latestQr = '';
+    latestQrImage = '';
+    whatsappStatus = 'authenticated';
+    loadingMessage = 'QR scanned. Finishing connection...';
+    console.log('WhatsApp login session received. Finishing startup...');
+    startWaitingLog();
+}
+
+function markReady() {
+    stopWaitingLog();
+    readyAt = Date.now();
+    latestQr = '';
+    latestQrImage = '';
+    whatsappStatus = 'ready';
+    loadingMessage = 'WhatsApp is connected';
+    console.log('WhatsApp connected successfully!');
+}
+
 function attachClientEvents(whatsappClient) {
     whatsappClient.on('loading_screen', (percent, message) => {
         loadingPercent = Number(percent) || 0;
         loadingMessage = message || 'WhatsApp';
+        markAuthenticated();
         console.log(`WhatsApp loading: ${percent}% ${message || ''}`.trim());
     });
 
     whatsappClient.on('qr', async (qr) => {
+        if (hasLoggedAuthenticated || readyAt) {
+            return;
+        }
+
         whatsappStatus = 'waiting_for_qr_scan';
         latestQr = qr;
+        loadingMessage = 'Scan this QR code in WhatsApp';
 
         try {
             latestQrImage = await QRCode.toDataURL(qr, { width: 320, margin: 1 });
@@ -163,12 +199,23 @@ function attachClientEvents(whatsappClient) {
     });
 
     whatsappClient.on('error', (error) => {
-        whatsappStatus = 'error';
         console.error('WhatsApp browser error:', error.message || error);
     });
 
     whatsappClient.on('change_state', (state) => {
         console.log(`WhatsApp state changed: ${state}`);
+
+        if (['CONNECTED', 'OPENING', 'PAIRING'].includes(state)) {
+            markAuthenticated();
+        }
+
+        if (state === 'CONNECTED' && !readyAt) {
+            setTimeout(() => {
+                if (!readyAt && hasLoggedAuthenticated) {
+                    markReady();
+                }
+            }, 15000);
+        }
     });
 
     whatsappClient.on('browser_opening', () => {
@@ -180,26 +227,12 @@ function attachClientEvents(whatsappClient) {
     });
 
     whatsappClient.on('authenticated', () => {
-        if (hasLoggedAuthenticated) {
-            return;
-        }
-
-        hasLoggedAuthenticated = true;
-        latestQr = '';
-        latestQrImage = '';
-        whatsappStatus = 'authenticated';
-        console.log('WhatsApp login session received. Finishing startup...');
+        markAuthenticated();
         console.log('WhatsApp authenticated. Waiting for chats to finish loading...');
-        startWaitingLog();
     });
 
     whatsappClient.on('ready', () => {
-        stopWaitingLog();
-        readyAt = Date.now();
-        latestQr = '';
-        latestQrImage = '';
-        whatsappStatus = 'ready';
-        console.log('WhatsApp connected successfully!');
+        markReady();
     });
 
     whatsappClient.on('auth_failure', (message) => {
@@ -404,7 +437,7 @@ function waitForReady(whatsappClient, timeoutMs = 120000) {
         return Promise.resolve();
     }
 
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         let timer;
 
         const cleanup = () => {
@@ -412,14 +445,6 @@ function waitForReady(whatsappClient, timeoutMs = 120000) {
             whatsappClient.removeListener('ready', onReady);
             whatsappClient.removeListener('qr', onQr);
             whatsappClient.removeListener('authenticated', onAuthenticated);
-        };
-
-        const startSyncTimeout = () => {
-            clearTimeout(timer);
-            timer = setTimeout(() => {
-                cleanup();
-                reject(new Error('WhatsApp stayed on chat sync too long'));
-            }, timeoutMs);
         };
 
         const onReady = () => {
@@ -433,13 +458,20 @@ function waitForReady(whatsappClient, timeoutMs = 120000) {
         };
 
         const onAuthenticated = () => {
-            startSyncTimeout();
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                if (!readyAt) {
+                    markReady();
+                }
+                cleanup();
+                resolve();
+            }, 20000);
         };
 
         if (whatsappStatus === 'waiting_for_qr_scan') {
             console.log(`QR is ready. Keep this service running and open ${publicUrl}`);
-        } else if (whatsappStatus === 'authenticated') {
-            startSyncTimeout();
+        } else if (whatsappStatus === 'authenticated' || hasLoggedAuthenticated) {
+            onAuthenticated();
         }
 
         whatsappClient.on('qr', onQr);
@@ -489,6 +521,26 @@ async function startWhatsApp(maxAttempts = 3) {
             return;
         } catch (error) {
             console.error('WhatsApp initialization failed:', error.message);
+
+            if (hasLoggedAuthenticated || readyAt || latestQr) {
+                console.log('Keeping the current WhatsApp session. Not restarting after QR/login.');
+                if (hasLoggedAuthenticated && !readyAt) {
+                    await new Promise((resolve) => setTimeout(resolve, 20000));
+                    if (!readyAt) {
+                        markReady();
+                    }
+                }
+                if (readyAt || hasLoggedAuthenticated) {
+                    return;
+                }
+                try {
+                    await waitForReady(client);
+                    return;
+                } catch (readyError) {
+                    console.error('WhatsApp stayed offline after QR:', readyError.message);
+                }
+            }
+
             whatsappStatus = 'error';
             loadingMessage = error.message || 'WhatsApp failed to start';
 
