@@ -40,16 +40,17 @@ function elapsedLabel() {
 
 function renderQrPage() {
     const connected = Boolean(readyAt);
+    const hasQr = Boolean(latestQrImage) && !connected;
     const heading = connected
         ? 'WhatsApp is connected'
-        : latestQrImage
-            ? 'Scan this QR code with WhatsApp'
-            : 'WhatsApp is starting...';
+        : hasQr
+            ? 'Scan this QR code first'
+            : 'Getting WhatsApp QR code...';
     const details = connected
         ? 'You can close this page. Keep the Render service running.'
-        : latestQrImage
-            ? 'Open WhatsApp → Linked devices → Link a device, then scan this code.'
-            : 'On Render this can take 2 to 5 minutes the first time. Keep this tab open.';
+        : hasQr
+            ? 'Scan this code in WhatsApp first. After that, the bot will finish connecting.'
+            : 'Wait here for the QR code. Loading 0% is normal until the code appears.';
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -67,9 +68,10 @@ function renderQrPage() {
 <body>
     <h1>${escapeHtml(heading)}</h1>
     <p class="status">Status: ${escapeHtml(whatsappStatus)}</p>
-    ${connected || latestQrImage ? '' : `<p>Loading: ${escapeHtml(String(loadingPercent))}% ${escapeHtml(loadingMessage)}</p>`}
+    ${hasQr ? `<img alt="WhatsApp QR code" src="${latestQrImage}">` : `<p>${escapeHtml(loadingMessage)}</p>`}
+    ${connected && loadingPercent ? `<p>Finishing login: ${escapeHtml(String(loadingPercent))}%</p>` : ''}
+    ${whatsappStatus === 'authenticated' ? `<p>QR scanned. Finishing login: ${escapeHtml(String(loadingPercent))}%</p>` : ''}
     <p class="status">Elapsed: ${escapeHtml(elapsedLabel())}</p>
-    ${latestQrImage && !connected ? `<img alt="WhatsApp QR code" src="${latestQrImage}">` : ''}
     <p>${escapeHtml(details)}</p>
 </body>
 </html>`;
@@ -96,6 +98,13 @@ app.get('/status', (request, response) => {
 app.listen(port, () => {
     console.log(`Health server listening on port ${port}`);
     console.log(`Open ${publicUrl} to scan the WhatsApp QR code.`);
+    setTimeout(() => {
+        startWhatsApp().catch((error) => {
+            whatsappStatus = 'error';
+            loadingMessage = error.message || 'WhatsApp failed to start';
+            console.error('WhatsApp startup failed:', error.message || error);
+        });
+    }, 2000);
 });
 
 function createClient() {
@@ -123,8 +132,8 @@ function createClient() {
                 '--disable-software-rasterizer',
                 '--no-first-run',
                 '--no-zygote',
-                '--mute-audio',
-                ...(process.env.WHATSAPP_SINGLE_PROCESS === '1' ? ['--single-process'] : [])
+                '--single-process',
+                '--mute-audio'
             ]
         }
     });
@@ -460,12 +469,18 @@ async function startWhatsApp(maxAttempts = 3) {
 
         try {
             whatsappStatus = 'initializing';
+            loadingMessage = 'Waiting for WhatsApp QR code...';
             console.log('Initializing WhatsApp client...');
             const readyPromise = waitForReady(client);
             await Promise.race([
                 client.initialize(),
                 new Promise((resolve, reject) => {
                     setTimeout(() => {
+                        if (latestQr || whatsappStatus === 'waiting_for_qr_scan') {
+                            resolve();
+                            return;
+                        }
+
                         reject(new Error('WhatsApp browser initialization timed out after 7 minutes'));
                     }, 420000);
                 })
@@ -474,6 +489,8 @@ async function startWhatsApp(maxAttempts = 3) {
             return;
         } catch (error) {
             console.error('WhatsApp initialization failed:', error.message);
+            whatsappStatus = 'error';
+            loadingMessage = error.message || 'WhatsApp failed to start';
 
             try {
                 await client.destroy();
@@ -482,8 +499,7 @@ async function startWhatsApp(maxAttempts = 3) {
             }
 
             if (attempt === maxAttempts) {
-                console.error('Could not connect after 3 attempts. Redeploy or restart the Render service.');
-                process.exitCode = 1;
+                console.error('Could not connect after 3 attempts. Keep this page open and restart the Render service.');
                 return;
             }
 
@@ -492,4 +508,12 @@ async function startWhatsApp(maxAttempts = 3) {
     }
 }
 
-startWhatsApp();
+process.on('uncaughtException', (error) => {
+    whatsappStatus = 'error';
+    loadingMessage = error.message || 'Unexpected server error';
+    console.error('uncaughtException:', error.message || error);
+});
+
+process.on('unhandledRejection', (error) => {
+    console.error('unhandledRejection:', error && error.message ? error.message : error);
+});
