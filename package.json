@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "postinstall": "npx puppeteer browsers install chrome",
+    "postinstall": "node node_modules/puppeteer/lib/cjs/puppeteer/node/cli.js browsers install chrome",
     "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
