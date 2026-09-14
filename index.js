@@ -19,6 +19,9 @@ let latestQrImage = '';
 let readyAt = 0;
 let hasLoggedAuthenticated = false;
 let waitingLogTimer = null;
+let startupStartedAt = Date.now();
+let loadingPercent = 0;
+let loadingMessage = 'Starting Chrome...';
 
 function escapeHtml(value) {
     return String(value)
@@ -26,6 +29,13 @@ function escapeHtml(value) {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+}
+
+function elapsedLabel() {
+    const seconds = Math.max(0, Math.round((Date.now() - startupStartedAt) / 1000));
+    const minutes = Math.floor(seconds / 60);
+    const remaining = seconds % 60;
+    return minutes > 0 ? `${minutes}m ${remaining}s` : `${seconds}s`;
 }
 
 function renderQrPage() {
@@ -39,14 +49,14 @@ function renderQrPage() {
         ? 'You can close this page. Keep the Render service running.'
         : latestQrImage
             ? 'Open WhatsApp → Linked devices → Link a device, then scan this code.'
-            : 'Refresh this page in a few seconds. The QR appears after Chrome finishes loading WhatsApp Web.';
+            : 'On Render this can take 2 to 5 minutes the first time. Keep this tab open.';
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    ${connected ? '' : '<meta http-equiv="refresh" content="5">'}
+    ${connected ? '' : '<meta http-equiv="refresh" content="3">'}
     <title>WhatsApp login</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 420px; margin: 40px auto; padding: 0 16px; text-align: center; color: #111; }
@@ -57,6 +67,8 @@ function renderQrPage() {
 <body>
     <h1>${escapeHtml(heading)}</h1>
     <p class="status">Status: ${escapeHtml(whatsappStatus)}</p>
+    ${connected || latestQrImage ? '' : `<p>Loading: ${escapeHtml(String(loadingPercent))}% ${escapeHtml(loadingMessage)}</p>`}
+    <p class="status">Elapsed: ${escapeHtml(elapsedLabel())}</p>
     ${latestQrImage && !connected ? `<img alt="WhatsApp QR code" src="${latestQrImage}">` : ''}
     <p>${escapeHtml(details)}</p>
 </body>
@@ -75,7 +87,9 @@ app.get('/status', (request, response) => {
     response.json({
         status: whatsappStatus,
         ready: Boolean(readyAt),
-        hasQr: Boolean(latestQr)
+        hasQr: Boolean(latestQr),
+        loadingPercent,
+        elapsedSeconds: Math.round((Date.now() - startupStartedAt) / 1000)
     });
 });
 
@@ -91,16 +105,16 @@ function createClient() {
     return new Client({
         authStrategy: new LocalAuth(),
         webVersionCache: {
-            type: 'none'
+            type: 'local'
         },
-        authTimeoutMs: 120000,
+        authTimeoutMs: 360000,
         userAgent:
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.31 Safari/537.36',
         puppeteer: {
             headless: true,
             executablePath,
             dumpio: process.env.DEBUG_CHROME === '1',
-            protocolTimeout: 180000,
+            protocolTimeout: 420000,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -109,8 +123,8 @@ function createClient() {
                 '--disable-software-rasterizer',
                 '--no-first-run',
                 '--no-zygote',
-                '--single-process',
-                '--mute-audio'
+                '--mute-audio',
+                ...(process.env.WHATSAPP_SINGLE_PROCESS === '1' ? ['--single-process'] : [])
             ]
         }
     });
@@ -118,6 +132,8 @@ function createClient() {
 
 function attachClientEvents(whatsappClient) {
     whatsappClient.on('loading_screen', (percent, message) => {
+        loadingPercent = Number(percent) || 0;
+        loadingMessage = message || 'WhatsApp';
         console.log(`WhatsApp loading: ${percent}% ${message || ''}`.trim());
     });
 
@@ -428,6 +444,9 @@ async function startWhatsApp(maxAttempts = 3) {
         readyAt = 0;
         latestQr = '';
         latestQrImage = '';
+        loadingPercent = 0;
+        loadingMessage = 'Starting Chrome...';
+        startupStartedAt = Date.now();
         hasLoggedAuthenticated = false;
         stopWaitingLog();
         client = createClient();
@@ -447,8 +466,8 @@ async function startWhatsApp(maxAttempts = 3) {
                 client.initialize(),
                 new Promise((resolve, reject) => {
                     setTimeout(() => {
-                        reject(new Error('WhatsApp browser initialization timed out after 180 seconds'));
-                    }, 180000);
+                        reject(new Error('WhatsApp browser initialization timed out after 7 minutes'));
+                    }, 420000);
                 })
             ]);
             await readyPromise;
