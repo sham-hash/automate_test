@@ -58,6 +58,19 @@ function attachClientEvents(whatsappClient) {
     whatsappClient.on('qr', (qr) => {
         console.log('Scan this QR code with WhatsApp:');
         qrcode.generate(qr, { small: true });
+        console.log(`QR_CODE_PAYLOAD:${qr}`);
+    });
+
+    whatsappClient.on('change_state', (state) => {
+        console.log(`WhatsApp state changed: ${state}`);
+    });
+
+    whatsappClient.on('browser_opening', () => {
+        console.log('WhatsApp browser is opening...');
+    });
+
+    whatsappClient.on('browser_close', () => {
+        console.log('WhatsApp browser closed.');
     });
 
     whatsappClient.on('authenticated', () => {
@@ -307,7 +320,15 @@ async function startWhatsApp(maxAttempts = 3) {
         );
 
         try {
-            await client.initialize();
+            console.log('Initializing WhatsApp client...');
+            await Promise.race([
+                client.initialize(),
+                new Promise((resolve, reject) => {
+                    setTimeout(() => {
+                        reject(new Error('WhatsApp browser initialization timed out after 120 seconds'));
+                    }, 120000);
+                })
+            ]);
             await waitForReady(client);
             return;
         } catch (error) {
