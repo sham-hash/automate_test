@@ -45,6 +45,8 @@ function createClient() {
         puppeteer: {
             headless: true,
             executablePath,
+            dumpio: true,
+            protocolTimeout: 120000,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
