@@ -3,7 +3,6 @@ process.env.PUPPETEER_CACHE_DIR = path.join(__dirname, '.puppeteer-cache');
 
 const express = require('express');
 const puppeteer = require('puppeteer');
-            whatsappStatus = 'initializing';
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
@@ -336,6 +335,7 @@ async function startWhatsApp(maxAttempts = 3) {
         );
 
         try {
+            whatsappStatus = 'initializing';
             console.log('Initializing WhatsApp client...');
             await Promise.race([
                 client.initialize(),
