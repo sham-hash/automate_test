@@ -2,6 +2,7 @@ const path = require('path');
 process.env.PUPPETEER_CACHE_DIR = path.join(__dirname, '.puppeteer-cache');
 
 const express = require('express');
+const puppeteer = require('puppeteer');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
@@ -27,6 +28,9 @@ let hasLoggedAuthenticated = false;
 let waitingLogTimer = null;
 
 function createClient() {
+    const executablePath = puppeteer.executablePath();
+    console.log(`Using Chrome executable: ${executablePath}`);
+
     return new Client({
         authStrategy: new LocalAuth(),
         webVersionCache: {
@@ -35,6 +39,7 @@ function createClient() {
         authTimeoutMs: 90000,
         puppeteer: {
             headless: true,
+            executablePath,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -61,6 +66,7 @@ function attachClientEvents(whatsappClient) {
         }
 
         hasLoggedAuthenticated = true;
+        console.log('WhatsApp login session received. Finishing startup...');
         console.log('WhatsApp authenticated. Waiting for chats to finish loading...');
         startWaitingLog();
     });
