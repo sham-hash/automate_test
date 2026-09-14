@@ -3,14 +3,68 @@ process.env.PUPPETEER_CACHE_DIR = path.join(__dirname, '.puppeteer-cache');
 
 const express = require('express');
 const puppeteer = require('puppeteer');
+const QRCode = require('qrcode');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
+const publicUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${port}`;
+
+let client;
+const chatMenus = new Map();
+let whatsappStatus = 'starting';
+let latestQr = '';
+let latestQrImage = '';
+let readyAt = 0;
+let hasLoggedAuthenticated = false;
+let waitingLogTimer = null;
+
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function renderQrPage() {
+    const connected = Boolean(readyAt);
+    const heading = connected
+        ? 'WhatsApp is connected'
+        : latestQrImage
+            ? 'Scan this QR code with WhatsApp'
+            : 'WhatsApp is starting...';
+    const details = connected
+        ? 'You can close this page. Keep the Render service running.'
+        : latestQrImage
+            ? 'Open WhatsApp → Linked devices → Link a device, then scan this code.'
+            : 'Refresh this page in a few seconds. The QR appears after Chrome finishes loading WhatsApp Web.';
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    ${connected ? '' : '<meta http-equiv="refresh" content="5">'}
+    <title>WhatsApp login</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 420px; margin: 40px auto; padding: 0 16px; text-align: center; color: #111; }
+        img { width: 280px; height: 280px; background: #fff; padding: 12px; border: 1px solid #ddd; }
+        .status { color: #555; }
+    </style>
+</head>
+<body>
+    <h1>${escapeHtml(heading)}</h1>
+    <p class="status">Status: ${escapeHtml(whatsappStatus)}</p>
+    ${latestQrImage && !connected ? `<img alt="WhatsApp QR code" src="${latestQrImage}">` : ''}
+    <p>${escapeHtml(details)}</p>
+</body>
+</html>`;
+}
 
 app.get('/', (request, response) => {
-    response.json({ status: 'ok', service: 'whatsapp-n8n' });
+    response.type('html').send(renderQrPage());
 });
 
 app.get('/health', (request, response) => {
@@ -18,19 +72,17 @@ app.get('/health', (request, response) => {
 });
 
 app.get('/status', (request, response) => {
-    response.json({ status: whatsappStatus, ready: Boolean(readyAt) });
+    response.json({
+        status: whatsappStatus,
+        ready: Boolean(readyAt),
+        hasQr: Boolean(latestQr)
+    });
 });
 
 app.listen(port, () => {
     console.log(`Health server listening on port ${port}`);
+    console.log(`Open ${publicUrl} to scan the WhatsApp QR code.`);
 });
-
-let client;
-const chatMenus = new Map();
-let whatsappStatus = 'starting';
-let readyAt = 0;
-let hasLoggedAuthenticated = false;
-let waitingLogTimer = null;
 
 function createClient() {
     const executablePath = puppeteer.executablePath();
@@ -41,17 +93,24 @@ function createClient() {
         webVersionCache: {
             type: 'none'
         },
-        authTimeoutMs: 90000,
+        authTimeoutMs: 120000,
+        userAgent:
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.31 Safari/537.36',
         puppeteer: {
             headless: true,
             executablePath,
-            dumpio: true,
-            protocolTimeout: 120000,
+            dumpio: process.env.DEBUG_CHROME === '1',
+            protocolTimeout: 180000,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-gpu'
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process',
+                '--mute-audio'
             ]
         }
     });
@@ -62,11 +121,20 @@ function attachClientEvents(whatsappClient) {
         console.log(`WhatsApp loading: ${percent}% ${message || ''}`.trim());
     });
 
-    whatsappClient.on('qr', (qr) => {
+    whatsappClient.on('qr', async (qr) => {
         whatsappStatus = 'waiting_for_qr_scan';
+        latestQr = qr;
+
+        try {
+            latestQrImage = await QRCode.toDataURL(qr, { width: 320, margin: 1 });
+        } catch (error) {
+            latestQrImage = '';
+            console.error('Failed to render QR image:', error.message || error);
+        }
+
         console.log('Scan this QR code with WhatsApp:');
         qrcode.generate(qr, { small: true });
-        console.log(`QR_CODE_PAYLOAD:${qr}`);
+        console.log(`Open ${publicUrl} to scan the QR code in your browser.`);
     });
 
     whatsappClient.on('error', (error) => {
@@ -92,6 +160,8 @@ function attachClientEvents(whatsappClient) {
         }
 
         hasLoggedAuthenticated = true;
+        latestQr = '';
+        latestQrImage = '';
         whatsappStatus = 'authenticated';
         console.log('WhatsApp login session received. Finishing startup...');
         console.log('WhatsApp authenticated. Waiting for chats to finish loading...');
@@ -101,6 +171,8 @@ function attachClientEvents(whatsappClient) {
     whatsappClient.on('ready', () => {
         stopWaitingLog();
         readyAt = Date.now();
+        latestQr = '';
+        latestQrImage = '';
         whatsappStatus = 'ready';
         console.log('WhatsApp connected successfully!');
     });
@@ -302,22 +374,51 @@ function getSelectionFromText(body, chatId) {
     return null;
 }
 
-function waitForReady(whatsappClient, timeoutMs = 90000) {
+function waitForReady(whatsappClient, timeoutMs = 120000) {
     if (readyAt) {
         return Promise.resolve();
     }
 
     return new Promise((resolve, reject) => {
-        const onReady = () => {
+        let timer;
+
+        const cleanup = () => {
             clearTimeout(timer);
+            whatsappClient.removeListener('ready', onReady);
+            whatsappClient.removeListener('qr', onQr);
+            whatsappClient.removeListener('authenticated', onAuthenticated);
+        };
+
+        const startSyncTimeout = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                cleanup();
+                reject(new Error('WhatsApp stayed on chat sync too long'));
+            }, timeoutMs);
+        };
+
+        const onReady = () => {
+            cleanup();
             resolve();
         };
 
-        const timer = setTimeout(() => {
-            whatsappClient.removeListener('ready', onReady);
-            reject(new Error('WhatsApp stayed on chat sync too long'));
-        }, timeoutMs);
+        const onQr = () => {
+            clearTimeout(timer);
+            console.log(`QR is ready. Keep this service running and open ${publicUrl}`);
+        };
 
+        const onAuthenticated = () => {
+            startSyncTimeout();
+        };
+
+        if (whatsappStatus === 'waiting_for_qr_scan') {
+            console.log(`QR is ready. Keep this service running and open ${publicUrl}`);
+        } else if (whatsappStatus === 'authenticated') {
+            startSyncTimeout();
+        }
+
+        whatsappClient.on('qr', onQr);
+        whatsappClient.on('authenticated', onAuthenticated);
         whatsappClient.once('ready', onReady);
     });
 }
@@ -325,6 +426,8 @@ function waitForReady(whatsappClient, timeoutMs = 90000) {
 async function startWhatsApp(maxAttempts = 3) {
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         readyAt = 0;
+        latestQr = '';
+        latestQrImage = '';
         hasLoggedAuthenticated = false;
         stopWaitingLog();
         client = createClient();
@@ -339,15 +442,16 @@ async function startWhatsApp(maxAttempts = 3) {
         try {
             whatsappStatus = 'initializing';
             console.log('Initializing WhatsApp client...');
+            const readyPromise = waitForReady(client);
             await Promise.race([
                 client.initialize(),
                 new Promise((resolve, reject) => {
                     setTimeout(() => {
-                        reject(new Error('WhatsApp browser initialization timed out after 120 seconds'));
-                    }, 120000);
+                        reject(new Error('WhatsApp browser initialization timed out after 180 seconds'));
+                    }, 180000);
                 })
             ]);
-            await waitForReady(client);
+            await readyPromise;
             return;
         } catch (error) {
             console.error('WhatsApp initialization failed:', error.message);
@@ -359,7 +463,7 @@ async function startWhatsApp(maxAttempts = 3) {
             }
 
             if (attempt === maxAttempts) {
-                console.error('Could not connect after 3 attempts. Run node index.js again.');
+                console.error('Could not connect after 3 attempts. Redeploy or restart the Render service.');
                 process.exitCode = 1;
                 return;
             }
