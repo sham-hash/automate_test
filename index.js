@@ -56,7 +56,7 @@ function renderQrPage() {
             ? 'Login succeeded. Waiting a few seconds for the bot to come online.'
             : hasQr
                 ? 'Scan this code in WhatsApp first. After that, the bot will finish connecting.'
-                : 'Wait here for the QR code. Do not refresh until it appears.';
+                : 'Wait here for the QR code. The first load on Render can take several minutes.';
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -123,14 +123,14 @@ function createClient() {
         },
         takeoverOnConflict: true,
         takeoverTimeoutMs: 10000,
-        authTimeoutMs: 360000,
+        authTimeoutMs: 600000,
         userAgent:
             'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.31 Safari/537.36',
         puppeteer: {
             headless: true,
             executablePath,
             dumpio: process.env.DEBUG_CHROME === '1',
-            protocolTimeout: 180000,
+            protocolTimeout: 0,
             handleSIGINT: false,
             handleSIGTERM: false,
             handleSIGHUP: false,
@@ -142,13 +142,6 @@ function createClient() {
                 '--disable-software-rasterizer',
                 '--disable-extensions',
                 '--disable-background-networking',
-                '--disable-background-timer-throttling',
-                '--disable-renderer-backgrounding',
-                '--disable-hang-monitor',
-                '--disable-breakpad',
-                '--disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process',
-                '--renderer-process-limit=1',
-                '--js-flags=--max-old-space-size=128',
                 '--no-first-run',
                 '--no-default-browser-check',
                 '--no-zygote',
@@ -538,13 +531,13 @@ async function startWhatsApp(maxAttempts = 3) {
                 client.initialize(),
                 new Promise((resolve, reject) => {
                     setTimeout(() => {
-                        if (latestQr || whatsappStatus === 'waiting_for_qr_scan') {
+                        if (latestQr || whatsappStatus === 'waiting_for_qr_scan' || hasLoggedAuthenticated) {
                             resolve();
                             return;
                         }
 
-                        reject(new Error('WhatsApp browser initialization timed out after 7 minutes'));
-                    }, 420000);
+                        reject(new Error('WhatsApp browser initialization timed out after 10 minutes'));
+                    }, 600000);
                 })
             ]);
             await readyPromise;
@@ -571,9 +564,6 @@ async function startWhatsApp(maxAttempts = 3) {
                 }
             }
 
-            whatsappStatus = 'error';
-            loadingMessage = error.message || 'WhatsApp failed to start';
-
             try {
                 await client.destroy();
             } catch (destroyError) {
@@ -581,11 +571,16 @@ async function startWhatsApp(maxAttempts = 3) {
             }
 
             if (attempt === maxAttempts) {
+                whatsappStatus = 'error';
+                loadingMessage = error.message || 'WhatsApp failed to start';
                 console.error('Could not connect after 3 attempts. Keep this page open and restart the Render service.');
                 return;
             }
 
-            await new Promise((resolve) => setTimeout(resolve, 3000));
+            whatsappStatus = 'initializing';
+            loadingMessage = `Chrome timed out. Retrying for the QR code (${attempt + 1}/${maxAttempts})...`;
+            console.log(loadingMessage);
+            await new Promise((resolve) => setTimeout(resolve, 5000));
         }
     }
     } finally {
